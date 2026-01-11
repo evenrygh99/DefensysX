@@ -1,0 +1,1623 @@
+﻿<!DOCTYPE html>
+<!-- @even rygh -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SOC Platform &mdash; BYOL &amp; Simulation</title>
+    <script src="./config.js"></script>
+    <script src="./vendor/react.production.min.js"></script>
+    <script src="./vendor/react-dom.production.min.js"></script>
+    <script src="./vendor/framer-motion.js"></script>
+    <script src="./vendor/babel.min.js"></script>
+    <script src="./vendor/tailwindcss.js"></script>
+
+    <style>
+        /* Subtle scroll reveal (respects reduced motion). */
+        /* Default to visible so content never disappears if JS fails. */
+        .reveal { opacity: 1; transform: none; }
+        .reveal-enabled .reveal { opacity: 0; transform: translateY(10px); transition: opacity 600ms ease, transform 600ms ease; will-change: opacity, transform; }
+        .reveal-enabled .reveal.is-visible { opacity: 1; transform: translateY(0); }
+
+        /* Intro overlay micro-animations (kept subtle, respects reduced motion). */
+        .tour-animate { will-change: transform, opacity; }
+        .tour-dot { animation: tourPulse 2.4s ease-in-out infinite; }
+        .tour-scan { animation: tourScan 4.2s linear infinite; }
+        .tour-tabs-indicator { animation: tourTabs 6.8s ease-in-out infinite; }
+        .tour-grid { background-image: linear-gradient(to right, rgba(255,255,255,0.04) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.04) 1px, transparent 1px); background-size: 28px 28px; animation: tourGrid 14s linear infinite; }
+        .tour-rotate-1 { animation: tourRotate1 9s ease-in-out infinite; }
+        .tour-rotate-2 { animation: tourRotate2 9s ease-in-out infinite; }
+        .tour-rotate-3 { animation: tourRotate3 9s ease-in-out infinite; }
+
+        /* Allow scrolling without showing scrollbars. */
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+        .no-scrollbar::-webkit-scrollbar { width: 0; height: 0; display: none; }
+        @keyframes tourPulse {
+            0%, 100% { transform: scale(1); opacity: .55; }
+            50% { transform: scale(1.08); opacity: .95; }
+        }
+        @keyframes tourGrid {
+            0% { background-position: 0 0, 0 0; opacity: .65; }
+            100% { background-position: 56px 56px, 56px 56px; opacity: .65; }
+        }
+        @keyframes tourScan {
+            0% { transform: translateY(-45%); opacity: .12; }
+            50% { opacity: .65; }
+            100% { transform: translateY(45%); opacity: .12; }
+        }
+        @keyframes tourTabs {
+            0%, 18% { transform: translateX(0%); }
+            33%, 51% { transform: translateX(100%); }
+            66%, 84% { transform: translateX(200%); }
+            100% { transform: translateX(0%); }
+        }
+        @keyframes tourRotate1 { 0%, 28% { opacity: 1; transform: translateY(0); } 33%, 100% { opacity: 0; transform: translateY(8px); } }
+        @keyframes tourRotate2 { 0%, 33% { opacity: 0; transform: translateY(8px); } 38%, 61% { opacity: 1; transform: translateY(0); } 66%, 100% { opacity: 0; transform: translateY(8px); } }
+        @keyframes tourRotate3 { 0%, 66% { opacity: 0; transform: translateY(8px); } 71%, 95% { opacity: 1; transform: translateY(0); } 100% { opacity: 0; transform: translateY(8px); } }
+        @media (prefers-reduced-motion: reduce) {
+            html { scroll-behavior: auto !important; }
+            .reveal { opacity: 1 !important; transform: none !important; transition: none !important; }
+            .tour-animate { animation: none !important; }
+        }
+    </style>
+</head>
+<body class="bg-zinc-950 text-zinc-100 antialiased selection:bg-cyan-500/20 selection:text-cyan-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // Framer Motion (UMD) - optional at runtime; falls back to plain elements if not loaded.
+        const __FM__ = window.framerMotion || null;
+        const AnimatePresence = __FM__?.AnimatePresence || (({ children }) => <>{children}</>);
+
+        const stripMotionProps = (props) => {
+            const {
+                initial,
+                animate,
+                exit,
+                transition,
+                whileHover,
+                whileTap,
+                whileInView,
+                viewport,
+                layout,
+                layoutId,
+                drag,
+                dragConstraints,
+                dragElastic,
+                dragMomentum,
+                ...rest
+            } = props || {};
+            return rest;
+        };
+
+        const Plain = (Tag) => {
+            return ({ children, ...props }) => <Tag {...stripMotionProps(props)}>{children}</Tag>;
+        };
+
+        const M = {
+            div: __FM__?.motion?.div || Plain('div'),
+            section: __FM__?.motion?.section || Plain('section'),
+            button: __FM__?.motion?.button || Plain('button'),
+        };
+
+        const normalizeApiBase = (value) => {
+            if (!value || typeof value !== 'string') return '';
+            return value.replace(/\/+$/, '');
+        };
+
+        const deriveApiBaseFromLocation = () => {
+            try {
+                const host = window?.location?.hostname || '';
+                const proto = window?.location?.protocol || 'https:';
+                if (!host) return '';
+
+                // Development defaults
+                if (host === 'localhost' || host === '127.0.0.1') return 'http://127.0.0.1:8000';
+
+                // Production: same scheme, api.<hostname>
+                return `${proto}//api.${host}`;
+            } catch {
+                return '';
+            }
+        };
+
+        const API_BASE =
+            normalizeApiBase(window?.__SOC_CONFIG__?.apiBaseUrl) ||
+            normalizeApiBase(deriveApiBaseFromLocation()) ||
+            'http://127.0.0.1:8000';
+
+        function App() {
+            const [activeTab, setActiveTab] = useState('byol');
+            const [sessionId, setSessionId] = useState(null);
+            const [alerts, setAlerts] = useState([]);
+            const [alertsMeta, setAlertsMeta] = useState(null);
+            const [serviceStats, setServiceStats] = useState(null);
+            const [expandedAlertId, setExpandedAlertId] = useState(null);
+            const [severityFilter, setSeverityFilter] = useState('all');
+            const [sortMode, setSortMode] = useState('severity_desc');
+            const [query, setQuery] = useState('');
+            const [nowMs, setNowMs] = useState(Date.now());
+            const [simulationResult, setSimulationResult] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState(null);
+
+            const [showCreator, setShowCreator] = useState(false);
+
+            const WELCOME_KEY = 'soc_platform_welcome_dismissed_v1';
+            const [showWelcome, setShowWelcome] = useState(() => {
+                try {
+                    return window?.localStorage?.getItem(WELCOME_KEY) !== '1';
+                } catch {
+                    return true;
+                }
+            });
+
+            // UX: remove page scrollbars while the intro overlay is shown.
+            useEffect(() => {
+                if (!(showWelcome || showCreator)) return;
+                const prev = document.body.style.overflow;
+                document.body.style.overflow = 'hidden';
+                return () => {
+                    document.body.style.overflow = prev;
+                };
+            }, [showWelcome, showCreator]);
+
+            const lastFetchedSidRef = useRef(null);
+
+            const dismissWelcome = () => {
+                try {
+                    window?.localStorage?.setItem(WELCOME_KEY, '1');
+                } catch {
+                    // ignore
+                }
+                setShowWelcome(false);
+            };
+
+            const openCreator = () => setShowCreator(true);
+            const closeCreator = () => setShowCreator(false);
+
+            // Tick every second for expiry countdown
+            useEffect(() => {
+                if (!sessionId) return;
+                const t = setInterval(() => setNowMs(Date.now()), 1000);
+                return () => clearInterval(t);
+            }, [sessionId]);
+
+            // UI-only: scroll reveal for major sections. Keeps behavior unchanged.
+            useEffect(() => {
+                const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+                const elements = Array.from(document.querySelectorAll('[data-reveal]'));
+                if (elements.length === 0) return;
+
+                // Enable reveal mode only when JS is running.
+                document.documentElement.classList.add('reveal-enabled');
+
+                if (reduceMotion || !('IntersectionObserver' in window)) {
+                    elements.forEach((el) => el.classList.add('is-visible'));
+                    return;
+                }
+
+                // Safety net: never leave content hidden.
+                let cancelled = false;
+                const forceVisibleTimer = window.setTimeout(() => {
+                    if (cancelled) return;
+                    elements.forEach((el) => el.classList.add('is-visible'));
+                }, 1500);
+
+                const observer = new IntersectionObserver(
+                    (entries) => {
+                        for (const entry of entries) {
+                            if (entry.isIntersecting) {
+                                entry.target.classList.add('is-visible');
+                                observer.unobserve(entry.target);
+                            }
+                        }
+                    },
+                    { threshold: 0.12, rootMargin: '0px 0px -10% 0px' }
+                );
+
+                elements.forEach((el) => observer.observe(el));
+                return () => {
+                    cancelled = true;
+                    window.clearTimeout(forceVisibleTimer);
+                    observer.disconnect();
+                };
+            }, [activeTab, sessionId, alerts.length, simulationResult, alertsMeta]);
+
+            const TabButton = ({ id, icon, label, count, disabled }) => {
+                const isActive = activeTab === id;
+                return (
+                    <M.button
+                        type="button"
+                        onClick={() => setActiveTab(id)}
+                        disabled={disabled}
+                        aria-current={isActive ? 'page' : undefined}
+                        whileHover={__FM__ && !disabled ? { scale: 1.01 } : undefined}
+                        whileTap={__FM__ && !disabled ? { scale: 0.99 } : undefined}
+                        className={
+                            `group relative inline-flex items-center gap-2 px-5 py-3 rounded-2xl text-sm font-medium tracking-tight transition ` +
+                            (disabled ? ' opacity-50 cursor-not-allowed' : ' hover:text-zinc-50') +
+                            (isActive ? ' text-zinc-50' : ' text-zinc-300')
+                        }
+                    >
+                        {isActive && (
+                            <M.div
+                                layoutId="soc-nav-active"
+                                className="absolute inset-0 rounded-2xl bg-white/5 border border-cyan-500/20 shadow-[0_0_0_1px_rgba(34,211,238,0.10),0_18px_60px_rgba(0,0,0,0.55)]"
+                            />
+                        )}
+                        <span className="relative text-base leading-none" aria-hidden="true">{icon}</span>
+                        <span className="relative">{label}</span>
+                        {typeof count === 'number' && count > 0 && (
+                            <span className="relative ml-1 inline-flex items-center justify-center min-w-[1.8rem] h-6 px-2 rounded-full text-xs font-semibold bg-cyan-500/15 text-cyan-200 border border-cyan-500/20">
+                                {count}
+                            </span>
+                        )}
+                    </M.button>
+                );
+            };
+
+            const CTAButton = ({ onClick, children }) => {
+                return (
+                    <M.button
+                        type="button"
+                        onClick={onClick}
+                        whileHover={__FM__ ? { scale: 1.02 } : undefined}
+                        whileTap={__FM__ ? { scale: 0.99 } : undefined}
+                        className="relative inline-flex items-center justify-center w-full sm:w-auto px-8 py-4 rounded-2xl bg-cyan-500/20 border border-cyan-500/30 text-cyan-50 font-semibold tracking-tight shadow-[0_0_0_1px_rgba(34,211,238,0.12),0_12px_45px_rgba(0,0,0,0.55)] hover:bg-cyan-500/28 transition"
+                    >
+                        <span className="pointer-events-none absolute inset-0 rounded-2xl bg-gradient-to-r from-cyan-500/0 via-cyan-500/25 to-blue-500/0 opacity-70" />
+                        <M.div
+                            className="pointer-events-none absolute -inset-0.5 rounded-2xl opacity-60"
+                            animate={__FM__ ? { opacity: [0.35, 0.75, 0.35] } : undefined}
+                            transition={__FM__ ? { duration: 3.2, repeat: Infinity, ease: 'easeInOut' } : undefined}
+                            style={{ boxShadow: '0 0 40px rgba(34,211,238,0.18)' }}
+                        />
+                        <span className="relative">{children}</span>
+                    </M.button>
+                );
+            };
+
+            const FlowPanel = () => {
+                const Step = ({ title, subtitle }) => (
+                    <div className="flex items-start gap-4">
+                        <div className="mt-1 h-2.5 w-2.5 rounded-full bg-cyan-200/80 shadow-[0_0_0_6px_rgba(34,211,238,0.08)]" />
+                        <div>
+                            <p className="text-base font-semibold text-zinc-100">{title}</p>
+                            <p className="mt-1 text-sm text-zinc-300 leading-relaxed">{subtitle}</p>
+                        </div>
+                    </div>
+                );
+
+                return (
+                    <M.section
+                        initial={__FM__ ? { opacity: 0, y: 10 } : undefined}
+                        animate={__FM__ ? { opacity: 1, y: 0 } : undefined}
+                        transition={__FM__ ? { duration: 0.6, ease: 'easeOut' } : undefined}
+                        className="relative rounded-[28px] border border-zinc-800/70 bg-zinc-950/35 backdrop-blur-md shadow-[0_30px_90px_rgba(0,0,0,0.65)] overflow-hidden"
+                    >
+                        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-cyan-500/12 via-transparent to-blue-500/12" />
+                        <div className="pointer-events-none absolute inset-0 opacity-60 tour-grid" />
+                        <div className="relative p-10">
+                            <div className="flex items-center justify-between gap-4">
+                                <div>
+                                    <p className="text-sm text-zinc-300">Flow</p>
+                                    <p className="mt-1 text-xl font-semibold tracking-tight text-zinc-50">Upload {'\u2192'} Simulate {'\u2192'} Alerts</p>
+                                </div>
+                                <div className="hidden md:block text-xs text-zinc-400">fast loop {'\u2022'} deterministic detections</div>
+                            </div>
+
+                            <div className="mt-8 grid gap-7">
+                                <Step title="Upload" subtitle="Bring your own logs. Auto log-type detection supported." />
+                                <Step title="Simulate" subtitle="Run controlled scenarios to validate detections end-to-end." />
+                                <Step title="Alerts" subtitle="Triage severity, context, and actionable notes." />
+                            </div>
+
+                            <div className="mt-10 relative h-2 rounded-full bg-white/5 border border-zinc-800/70 overflow-hidden">
+                                <M.div
+                                    className="absolute inset-y-0 left-0 w-1/3 bg-gradient-to-r from-cyan-500/0 via-cyan-400/35 to-blue-500/0"
+                                    animate={__FM__ ? { x: ['0%', '200%', '0%'] } : undefined}
+                                    transition={__FM__ ? { duration: 6.8, repeat: Infinity, ease: 'easeInOut' } : undefined}
+                                />
+                            </div>
+                        </div>
+                    </M.section>
+                );
+            };
+
+            const HowItWorksTimeline = () => {
+                const Step = ({ n, title, desc, align }) => (
+                    <div className="flex-1 min-w-[240px]">
+                        <div className={`flex items-center gap-4 ${align || ''}`.trim()}>
+                            <div className="h-10 w-10 rounded-full border border-cyan-500/25 bg-cyan-500/10 flex items-center justify-center text-cyan-100 font-semibold">
+                                {n}
+                            </div>
+                            <div>
+                                <p className="text-sm text-zinc-400">{title}</p>
+                                <p className="mt-1 text-lg font-semibold text-zinc-100">{desc}</p>
+                            </div>
+                        </div>
+                    </div>
+                );
+
+                return (
+                    <div className="relative">
+                        <div className="hidden md:block absolute left-0 right-0 top-5 h-px bg-gradient-to-r from-cyan-500/0 via-cyan-500/25 to-cyan-500/0" />
+                        <div className="flex flex-col md:flex-row gap-10 md:gap-12">
+                            <Step n="01" title="Ingest" desc="Normalize events for analysis" />
+                            <Step n="02" title="Detect" desc="Apply rules with cooldown controls" />
+                            <Step n="03" title="Triage" desc="Review alerts and evidence" />
+                        </div>
+                    </div>
+                );
+            };
+
+            const Hero = ({ onStart }) => {
+                return (
+                    <div className="grid lg:grid-cols-12 gap-10 items-start">
+                        <div className="lg:col-span-6">
+                            <M.div
+                                initial={__FM__ ? { opacity: 0, y: 12 } : undefined}
+                                animate={__FM__ ? { opacity: 1, y: 0 } : undefined}
+                                transition={__FM__ ? { duration: 0.7, ease: 'easeOut' } : undefined}
+                            >
+                                <div className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-white/5 px-4 py-2 text-xs text-zinc-300">
+                                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-cyan-500/15 border border-cyan-500/20">
+                                        <svg className="h-3.5 w-3.5 text-cyan-200" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                                        </svg>
+                                    </span>
+                                    SOC Platform
+                                </div>
+
+                                <h2 className="mt-6 text-5xl md:text-6xl lg:text-7xl font-semibold tracking-tight leading-[1.02]">
+                                    Security command center
+                                </h2>
+                                <p className="mt-6 text-lg md:text-xl text-zinc-300 leading-relaxed max-w-xl">
+                                    Ingest logs, validate detections, and triage alerts {'\u2014'} in one fast, controlled workflow.
+                                </p>
+
+                                <div className="mt-10">
+                                    <CTAButton onClick={onStart}>Start SOC Platform</CTAButton>
+                                </div>
+
+                                <div className="mt-8 flex flex-wrap gap-3">
+                                    <span className="inline-flex items-center rounded-full border border-zinc-800 bg-zinc-950/30 px-4 py-2 text-xs text-zinc-200">In-memory sessions</span>
+                                    <span className="inline-flex items-center rounded-full border border-zinc-800 bg-zinc-950/30 px-4 py-2 text-xs text-zinc-200">TTL auto-expire</span>
+                                    <span className="inline-flex items-center rounded-full border border-cyan-500/25 bg-cyan-500/10 px-4 py-2 text-xs text-cyan-100">Auto log-type detection</span>
+                                </div>
+                            </M.div>
+                        </div>
+
+                        <div className="lg:col-span-6">
+                            <FlowPanel />
+                        </div>
+                    </div>
+                );
+            };
+
+            const SOCOverlay = ({ onDismiss }) => {
+                return (
+                    <AnimatePresence>
+                        <M.div
+                            key="soc-overlay"
+                            initial={__FM__ ? { opacity: 0 } : undefined}
+                            animate={__FM__ ? { opacity: 1 } : undefined}
+                            exit={__FM__ ? { opacity: 0 } : undefined}
+                            transition={__FM__ ? { duration: 0.35 } : undefined}
+                            className="fixed inset-0 z-50 bg-zinc-950"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-label="Welcome to SOC Platform"
+                        >
+                            <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-transparent to-blue-500/10" />
+                            <div className="pointer-events-none absolute inset-0 opacity-40 tour-grid" />
+
+                            <div className="relative h-full w-full overflow-hidden">
+                                <div className="h-full w-full overflow-y-auto no-scrollbar">
+                                    <div className="mx-auto max-w-[1400px] px-6 py-12">
+                                        <Hero onStart={onDismiss} />
+
+                                        <M.section
+                                            initial={__FM__ ? { opacity: 0, y: 10 } : undefined}
+                                            whileInView={__FM__ ? { opacity: 1, y: 0 } : undefined}
+                                            viewport={__FM__ ? { once: true, amount: 0.3 } : undefined}
+                                            transition={__FM__ ? { duration: 0.6, ease: 'easeOut' } : undefined}
+                                            className="mt-16"
+                                        >
+                                            <div className="flex items-end justify-between gap-6">
+                                                <div>
+                                                    <p className="text-sm text-zinc-400">How it works</p>
+                                                    <h3 className="mt-2 text-3xl md:text-4xl font-semibold tracking-tight text-zinc-50">A tight loop. Clear outcomes.</h3>
+                                                </div>
+                                                <div className="hidden md:block text-sm text-zinc-400 max-w-md text-right">
+                                                    A modern SOC workflow with deliberate constraints: ephemeral sessions, deterministic rules, and fast triage.
+                                                </div>
+                                            </div>
+
+                                            <div className="mt-10">
+                                                <HowItWorksTimeline />
+                                            </div>
+                                        </M.section>
+
+                                        <M.section
+                                            initial={__FM__ ? { opacity: 0, y: 10 } : undefined}
+                                            whileInView={__FM__ ? { opacity: 1, y: 0 } : undefined}
+                                            viewport={__FM__ ? { once: true, amount: 0.25 } : undefined}
+                                            transition={__FM__ ? { duration: 0.6, ease: 'easeOut' } : undefined}
+                                            className="mt-14"
+                                        >
+                                            <div className="rounded-[28px] border border-zinc-800/70 bg-zinc-950/35 backdrop-blur-md shadow-[0_30px_90px_rgba(0,0,0,0.55)] overflow-hidden">
+                                                <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-cyan-500/10 via-transparent to-blue-500/10" />
+                                                <div className="relative p-10 md:p-12">
+                                                    <div className="flex flex-col lg:flex-row lg:items-start gap-10">
+                                                        <div className="flex-1">
+                                                            <p className="text-sm text-zinc-400">Operational characteristics</p>
+                                                            <h4 className="mt-2 text-2xl md:text-3xl font-semibold tracking-tight text-zinc-100">Built for signal, not storage</h4>
+                                                            <p className="mt-4 text-base text-zinc-300 leading-relaxed max-w-2xl">
+                                                                Sessions are held in memory and expire automatically. Upload validation is layered, and the workflow is designed to stay responsive under load.
+                                                            </p>
+                                                        </div>
+                                                        <div className="flex-1">
+                                                            <div className="space-y-4 text-sm md:text-base text-zinc-200">
+                                                                <div className="flex gap-3"><span className="mt-1.5 h-2 w-2 rounded-full bg-cyan-200/80" /><span><span className="text-zinc-50 font-semibold">Ephemeral sessions</span> with TTL expiration.</span></div>
+                                                                <div className="flex gap-3"><span className="mt-1.5 h-2 w-2 rounded-full bg-cyan-200/80" /><span><span className="text-zinc-50 font-semibold">Auto log-type detection</span> across SSH, Nginx, and Apache formats.</span></div>
+                                                                <div className="flex gap-3"><span className="mt-1.5 h-2 w-2 rounded-full bg-cyan-200/80" /><span><span className="text-zinc-50 font-semibold">Detections with cooldown</span> to reduce alert spam.</span></div>
+                                                                <div className="flex gap-3"><span className="mt-1.5 h-2 w-2 rounded-full bg-cyan-200/80" /><span><span className="text-zinc-50 font-semibold">Fast triage</span> with context, evidence, and copyable notes.</span></div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </M.section>
+
+                                        <div className="mt-14 text-center text-xs text-zinc-500">Intro is shown once per browser.</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </M.div>
+                    </AnimatePresence>
+                );
+            };
+
+            const CreatorOverlay = ({ onClose }) => {
+                const handleBackdrop = (e) => {
+                    if (e.target === e.currentTarget) onClose();
+                };
+
+                return (
+                    <AnimatePresence>
+                        <M.div
+                            key="creator-overlay"
+                            initial={__FM__ ? { opacity: 0 } : undefined}
+                            animate={__FM__ ? { opacity: 1 } : undefined}
+                            exit={__FM__ ? { opacity: 0 } : undefined}
+                            transition={__FM__ ? { duration: 0.18 } : undefined}
+                            className="fixed inset-0 z-50 bg-zinc-950/75 backdrop-blur"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-label="About the creator"
+                            onMouseDown={handleBackdrop}
+                        >
+                            <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-transparent to-blue-500/10" />
+                            <div className="pointer-events-none absolute inset-0 opacity-25 tour-grid" />
+
+                            <div className="relative h-full w-full overflow-hidden">
+                                <div className="h-full w-full overflow-y-auto no-scrollbar">
+                                    <div className="mx-auto max-w-[1100px] px-6 py-10">
+                                        <div className="flex justify-end">
+                                            <M.button
+                                                type="button"
+                                                onClick={onClose}
+                                                whileHover={__FM__ ? { scale: 1.01 } : undefined}
+                                                whileTap={__FM__ ? { scale: 0.99 } : undefined}
+                                                className="inline-flex items-center gap-2 rounded-xl border border-zinc-800 bg-white/5 px-4 py-2.5 text-sm text-zinc-200 transition hover:bg-white/10"
+                                            >
+                                                Close
+                                            </M.button>
+                                        </div>
+
+                                        <div className="mt-6">
+                                            <GlassPanel className="p-8 md:p-10">
+                                                <div className="grid md:grid-cols-12 gap-10 items-start">
+                                                    <div className="md:col-span-4">
+                                                        <div className="rounded-3xl border border-zinc-800/70 bg-zinc-950/40 overflow-hidden">
+                                                            <img
+                                                                src="./assets/creator_profile.jpg"
+                                                                alt="Even Rygh"
+                                                                className="w-full h-auto object-cover"
+                                                                loading="lazy"
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                    <div className="md:col-span-8">
+                                                        <p className="text-sm text-zinc-400">About the creator</p>
+                                                        <h2 className="mt-2 text-3xl md:text-4xl font-semibold tracking-tight text-zinc-50">Even Rygh</h2>
+                                                        <p className="mt-4 text-base text-zinc-300 leading-relaxed">
+                                                            Computer Engineering student specializing in Cybersecurity at the University of South-Eastern Norway (USN).
+                                                        </p>
+                                                        <p className="mt-4 text-base text-zinc-300 leading-relaxed">
+                                                            I enjoy building practical security tooling and systems with a strong focus on Linux, networking, and reliable operations.
+                                                            Through study projects, I have designed and built complete enterprise-style networks and services.
+                                                        </p>
+                                                        <p className="mt-4 text-base text-zinc-300 leading-relaxed">
+                                                            I prefer structured work, stay technically curious, and care about secure, stable IT environments.
+                                                        </p>
+
+                                                        <div className="mt-8 flex flex-wrap gap-3">
+                                                            <span className="inline-flex items-center rounded-full border border-zinc-800 bg-zinc-950/30 px-4 py-2 text-xs text-zinc-200">Cybersecurity</span>
+                                                            <span className="inline-flex items-center rounded-full border border-zinc-800 bg-zinc-950/30 px-4 py-2 text-xs text-zinc-200">Linux</span>
+                                                            <span className="inline-flex items-center rounded-full border border-zinc-800 bg-zinc-950/30 px-4 py-2 text-xs text-zinc-200">Networking</span>
+                                                            <span className="inline-flex items-center rounded-full border border-zinc-800 bg-zinc-950/30 px-4 py-2 text-xs text-zinc-200">Web</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </GlassPanel>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </M.div>
+                    </AnimatePresence>
+                );
+            };
+
+            const fetchStats = async () => {
+                try {
+                    const response = await fetch(`${API_BASE}/byol/stats`, { cache: 'no-store' });
+                    if (!response.ok) return;
+                    const data = await response.json();
+                    setServiceStats(data);
+                } catch {
+                    // stats are best-effort
+                }
+            };
+
+            // BYOL Upload
+            const handleFileUpload = async (e) => {
+                e.preventDefault();
+                setLoading(true);
+                setError(null);
+
+                // Get form data
+                const form = e.target;
+                const fileInput = form.querySelector('input[name="file"]');
+                const logTypeSelect = form.querySelector('select[name="log_type"]');
+                
+                // Create proper FormData
+                const formData = new FormData();
+                formData.append('file', fileInput.files[0]);
+                formData.append('log_type', logTypeSelect.value);
+                
+                try {
+                    const response = await fetch(`${API_BASE}/byol/upload`, {
+                        method: 'POST',
+                        body: formData,
+                        // Don't set Content-Type - browser will set it with boundary
+                    });
+
+                    if (!response.ok) {
+                        const errorData = await response.text();
+                        throw new Error(`Upload failed: ${errorData}`);
+                    }
+
+                    const data = await response.json();
+                    setSessionId(data.session_id);
+                    setActiveTab('alerts');
+
+                    // Prevent double-fetch: the effect will also react to session/tab.
+                    lastFetchedSidRef.current = data.session_id;
+                    
+                    // Auto-fetch alerts immediately (and surface errors if any)
+                    await fetchAlerts(data.session_id);
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            // Fetch Alerts
+            const fetchAlerts = async (sid) => {
+                try {
+                    const targetSessionId = sid || sessionId;
+                    if (!targetSessionId) return;
+
+                    const response = await fetch(`${API_BASE}/byol/${targetSessionId}/alerts`, {
+                        cache: 'no-store'
+                    });
+
+                    if (!response.ok) {
+                        let detail = '';
+                        try {
+                            const errData = await response.json();
+                            detail = errData?.detail ? String(errData.detail) : JSON.stringify(errData);
+                        } catch {
+                            detail = await response.text();
+                        }
+                        throw new Error(`Alerts fetch failed (${response.status}): ${detail}`);
+                    }
+
+                    const data = await response.json();
+                    setAlerts(Array.isArray(data.alerts) ? data.alerts : []);
+                    setAlertsMeta({
+                        session_info: data.session_info,
+                        summary: data.summary,
+                        metadata: data.metadata,
+                    });
+                    setError(null);
+                    fetchStats();
+                } catch (err) {
+                    setError(err?.message || 'Failed to fetch alerts');
+                }
+            };
+
+            // Ensure Alerts tab populates immediately when sessionId changes.
+            useEffect(() => {
+                if (!sessionId) {
+                    lastFetchedSidRef.current = null;
+                    return;
+                }
+                if (activeTab !== 'alerts') return;
+                if (lastFetchedSidRef.current === sessionId) return;
+                lastFetchedSidRef.current = sessionId;
+                fetchAlerts(sessionId);
+            }, [activeTab, sessionId]);
+
+            const clearSession = async () => {
+                if (!sessionId) return;
+                const ok = window.confirm('Clear this session? This deletes the session and all alerts/events in memory.');
+                if (!ok) return;
+
+                setLoading(true);
+                setError(null);
+                try {
+                    const response = await fetch(`${API_BASE}/byol/session/${sessionId}`, { method: 'DELETE' });
+                    if (!response.ok && response.status !== 204) {
+                        const text = await response.text();
+                        throw new Error(`Clear failed (${response.status}): ${text}`);
+                    }
+                    setSessionId(null);
+                    setAlerts([]);
+                    setAlertsMeta(null);
+                    setExpandedAlertId(null);
+                    setActiveTab('byol');
+                } catch (err) {
+                    setError(err?.message || 'Failed to clear session');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const formatDuration = (seconds) => {
+                if (seconds == null || Number.isNaN(seconds)) return '\u2014';
+                const s = Math.max(0, Math.floor(seconds));
+                const m = Math.floor(s / 60);
+                const r = s % 60;
+                return `${m.toString().padStart(2, '0')}:${r.toString().padStart(2, '0')}`;
+            };
+
+            const buildTriageNote = (alert) => {
+                const title = alert?.title || alert?.alert_type || alert?.rule_id || 'Alert';
+                const sev = (alert?.severity || 'info').toUpperCase();
+                const ts = alert?.timestamp || '';
+                const rule = alert?.rule_id || '';
+                const ips = Array.isArray(alert?.affected_ips) ? alert.affected_ips : [];
+                const hosts = Array.isArray(alert?.affected_hosts) ? alert.affected_hosts : [];
+
+                const lines = [];
+                lines.push(`SOC TRIAGE NOTE`);
+                lines.push(`Title: ${title}`);
+                lines.push(`Severity: ${sev}`);
+                if (rule) lines.push(`Rule: ${rule}`);
+                if (ts) lines.push(`Timestamp: ${ts}`);
+                if (ips.length) lines.push(`Affected IPs: ${ips.join(', ')}`);
+                if (hosts.length) lines.push(`Affected Hosts: ${hosts.join(', ')}`);
+                lines.push('');
+
+                if (alert?.soc_explanation?.why_triggered) {
+                    lines.push('WHY TRIGGERED');
+                    lines.push(String(alert.soc_explanation.why_triggered));
+                    lines.push('');
+                }
+
+                const dps = Array.isArray(alert?.soc_explanation?.data_points) ? alert.soc_explanation.data_points : [];
+                if (dps.length) {
+                    lines.push('KEY DATA POINTS');
+                    for (const dp of dps) {
+                        const label = dp?.label ?? 'Data';
+                        const value = Array.isArray(dp?.value) ? dp.value.join(', ') : String(dp?.value ?? '');
+                        lines.push(`- ${label}: ${value}`);
+                    }
+                    lines.push('');
+                }
+
+                if (alert?.description) {
+                    lines.push('DESCRIPTION');
+                    lines.push(String(alert.description));
+                    lines.push('');
+                }
+
+                const nextSteps = Array.isArray(alert?.soc_explanation?.recommended_next_steps)
+                    ? alert.soc_explanation.recommended_next_steps
+                    : [];
+                if (nextSteps.length) {
+                    lines.push('SOC NEXT STEPS');
+                    for (const step of nextSteps) lines.push(`- ${step}`);
+                    lines.push('');
+                }
+
+                const recs = Array.isArray(alert?.recommendations) ? alert.recommendations : [];
+                if (recs.length) {
+                    lines.push('RECOMMENDATIONS');
+                    for (const r of recs) lines.push(`- ${r}`);
+                    lines.push('');
+                }
+
+                if (alert?.evidence) {
+                    lines.push('EVIDENCE (JSON)');
+                    try {
+                        lines.push(JSON.stringify(alert.evidence, null, 2));
+                    } catch {
+                        lines.push(String(alert.evidence));
+                    }
+                }
+
+                return lines.join('\n');
+            };
+
+            const copyTriageNote = async (alert) => {
+                const note = buildTriageNote(alert);
+                try {
+                    if (navigator?.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(note);
+                        return;
+                    }
+                } catch {
+                    // fall through
+                }
+
+                // Fallback for browsers/contexts where clipboard is blocked
+                window.prompt('Copy triage note:', note);
+            };
+
+            const severityRank = (sev) => {
+                const v = (sev || '').toLowerCase();
+                if (v === 'critical') return 5;
+                if (v === 'high') return 4;
+                if (v === 'medium') return 3;
+                if (v === 'warning') return 3;
+                if (v === 'low') return 2;
+                if (v === 'info') return 1;
+                return 0;
+            };
+
+            const filteredSortedAlerts = useMemo(() => {
+                const q = (query || '').trim().toLowerCase();
+                const list = Array.isArray(alerts) ? alerts : [];
+
+                const filtered = list.filter(a => {
+                    const sev = (a?.severity || '').toLowerCase();
+                    if (severityFilter !== 'all' && sev !== severityFilter) return false;
+
+                    if (!q) return true;
+                    const hay = [
+                        a?.title,
+                        a?.alert_type,
+                        a?.rule_id,
+                        a?.description,
+                        a?.timestamp,
+                        (a?.affected_ips || []).join(' '),
+                        (a?.affected_hosts || []).join(' '),
+                    ].filter(Boolean).join(' ').toLowerCase();
+                    return hay.includes(q);
+                });
+
+                const toTime = (ts) => {
+                    const t = Date.parse(ts);
+                    return Number.isNaN(t) ? 0 : t;
+                };
+
+                const sorted = filtered.slice().sort((a, b) => {
+                    if (sortMode === 'time_desc') return toTime(b?.timestamp) - toTime(a?.timestamp);
+                    if (sortMode === 'time_asc') return toTime(a?.timestamp) - toTime(b?.timestamp);
+                    if (sortMode === 'severity_asc') return severityRank(a?.severity) - severityRank(b?.severity);
+                    if (sortMode === 'title_asc') return String(a?.title || a?.rule_id || '').localeCompare(String(b?.title || b?.rule_id || ''));
+                    // default severity_desc
+                    const s = severityRank(b?.severity) - severityRank(a?.severity);
+                    if (s !== 0) return s;
+                    return toTime(b?.timestamp) - toTime(a?.timestamp);
+                });
+
+                return sorted;
+            }, [alerts, query, severityFilter, sortMode]);
+
+            const simulationDisplay = useMemo(() => {
+                if (!simulationResult) return null;
+
+                const core = (simulationResult && typeof simulationResult === 'object' && simulationResult.simulation && typeof simulationResult.simulation === 'object')
+                    ? simulationResult.simulation
+                    : simulationResult;
+
+                const attackLabel =
+                    core?.attack_type ||
+                    simulationResult?.attack_type ||
+                    simulationResult?.scenario ||
+                    '\u2014';
+
+                const logLines =
+                    core?.log_lines_generated ??
+                    simulationResult?.log_lines_generated ??
+                    simulationResult?.total_log_lines ??
+                    '\u2014';
+
+                const durationSeconds =
+                    core?.duration_seconds ??
+                    simulationResult?.duration_seconds ??
+                    '\u2014';
+
+                const attackerIps = core?.attacker_ips ?? simulationResult?.attacker_ips;
+                const attackerCount = Array.isArray(attackerIps) ? attackerIps.length : 'Multiple';
+
+                let rawLogs = '';
+                if (typeof core?.log_content === 'string' && core.log_content) rawLogs = core.log_content;
+                else if (typeof simulationResult?.combined_logs === 'string' && simulationResult.combined_logs) rawLogs = simulationResult.combined_logs;
+                else if (typeof simulationResult?.log_content === 'string' && simulationResult.log_content) rawLogs = simulationResult.log_content;
+                else if (Array.isArray(simulationResult?.steps)) {
+                    rawLogs = simulationResult.steps
+                        .map(s => s?.simulation?.log_content)
+                        .filter(x => typeof x === 'string' && x.length)
+                        .join('\n\n');
+                }
+
+                const preview = String(rawLogs || '')
+                    .split(/\r?\n/)
+                    .slice(0, 10)
+                    .join('\n');
+
+                return {
+                    attackLabel,
+                    logLines,
+                    durationSeconds,
+                    attackerCount,
+                    preview: preview || '\u2014',
+                };
+            }, [simulationResult]);
+
+            // Run Attack Simulation
+            const runSimulation = async (attackType, intensity) => {
+                setLoading(true);
+                setError(null);
+                setSimulationResult(null);
+
+                try {
+                    const response = await fetch(
+                        `${API_BASE}/simulate/attack/quick/${attackType}/analyze?intensity=${intensity}`,
+                        { method: 'POST' }
+                    );
+
+                    if (!response.ok) throw new Error('Simulation failed');
+
+                    const data = await response.json();
+                    setSimulationResult(data);
+
+                    const newSessionId = data?.analysis?.session_id;
+                    if (newSessionId) {
+                        setSessionId(newSessionId);
+                        setActiveTab('alerts');
+                    }
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            // Run Scenario
+            const runScenario = async (scenario) => {
+                setLoading(true);
+                setError(null);
+                setSimulationResult(null);
+
+                try {
+                    const response = await fetch(
+                        `${API_BASE}/simulate/scenario/${scenario}/analyze`,
+                        { method: 'POST' }
+                    );
+
+                    if (!response.ok) throw new Error('Scenario failed');
+
+                    const data = await response.json();
+                    setSimulationResult(data);
+
+                    // Pick a best session to display (highest alert count)
+                    const steps = data?.steps || [];
+                    const best = steps
+                        .map(s => ({ sid: s?.analysis?.session_id, count: s?.analysis?.detection?.alerts_generated || 0 }))
+                        .filter(x => x.sid)
+                        .sort((a, b) => b.count - a.count)[0];
+                    if (best?.sid) {
+                        setSessionId(best.sid);
+                        setActiveTab('alerts');
+                    }
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const GlassPanel = ({ children, className }) => (
+                <div className={`relative rounded-[28px] border border-zinc-800/70 bg-zinc-950/35 backdrop-blur-md shadow-[0_30px_90px_rgba(0,0,0,0.55)] ${className || ''}`.trim()}>
+                    <div className="pointer-events-none absolute inset-0 rounded-[28px] bg-gradient-to-br from-cyan-500/8 via-transparent to-blue-500/8" />
+                    <div className="relative">{children}</div>
+                </div>
+            );
+
+            const PrimaryCTA = ({ type, disabled, children }) => (
+                <M.button
+                    type={type || 'button'}
+                    disabled={disabled}
+                    whileHover={__FM__ && !disabled ? { scale: 1.01 } : undefined}
+                    whileTap={__FM__ && !disabled ? { scale: 0.99 } : undefined}
+                    className="relative inline-flex items-center justify-center w-full px-8 py-4 rounded-2xl bg-cyan-500/20 border border-cyan-500/30 text-cyan-50 font-semibold tracking-tight shadow-[0_0_0_1px_rgba(34,211,238,0.12),0_18px_70px_rgba(0,0,0,0.60)] hover:bg-cyan-500/28 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    <span className="pointer-events-none absolute inset-0 rounded-2xl bg-gradient-to-r from-cyan-500/0 via-cyan-500/25 to-blue-500/0 opacity-70" />
+                    <M.div
+                        className="pointer-events-none absolute -inset-0.5 rounded-2xl opacity-60"
+                        animate={__FM__ && !disabled ? { opacity: [0.25, 0.7, 0.25] } : undefined}
+                        transition={__FM__ && !disabled ? { duration: 3.2, repeat: Infinity, ease: 'easeInOut' } : undefined}
+                        style={{ boxShadow: '0 0 46px rgba(34,211,238,0.20)' }}
+                    />
+                    <span className="relative">{children}</span>
+                </M.button>
+            );
+
+            const SOCNav = () => (
+                <div className="sticky top-[76px] z-20">
+                    <div className="mx-auto max-w-[1400px] px-6 pt-6">
+                        <div className="flex items-center justify-center">
+                            <div className="inline-flex items-center gap-1 rounded-3xl border border-zinc-800/70 bg-zinc-950/35 backdrop-blur-md p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.55)]">
+                                <TabButton id="byol" icon={'\uD83D\uDCE4'} label="Upload" />
+                                <TabButton id="simulation" icon={'\uD83E\uDDEA'} label="Simulate" />
+                                <TabButton id="alerts" icon={'\uD83D\uDD14'} label="Alerts" count={alerts.length} />
+                            </div>
+                        </div>
+                        <div className="mt-4 flex items-center justify-center text-xs text-zinc-500">
+                            API: <span className="ml-2 text-zinc-300 font-mono">{API_BASE}</span>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const UploadPanel = () => (
+                <div className="mx-auto max-w-4xl">
+                    <GlassPanel className="p-10">
+                        <div className="flex items-start justify-between gap-6">
+                            <div>
+                                <p className="text-sm text-zinc-400">Upload</p>
+                                <h2 className="mt-2 text-3xl md:text-4xl font-semibold tracking-tight text-zinc-50">Bring your own logs</h2>
+                                <p className="mt-4 text-base text-zinc-300 leading-relaxed max-w-2xl">
+                                    Upload logs for security analysis. Use Auto if you're not sure about the format.
+                                </p>
+                            </div>
+                        </div>
+
+                        <form onSubmit={handleFileUpload} className="mt-10 grid gap-7">
+                            <div className="grid gap-2">
+                                <label className="text-sm text-zinc-400">Log type</label>
+                                <select
+                                    name="log_type"
+                                    className="w-full px-4 py-3.5 bg-zinc-900/60 border border-zinc-800 rounded-2xl text-zinc-100 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
+                                    required
+                                >
+                                    <option value="auto">Auto (detect from file)</option>
+                                    <option value="ssh">SSH Authentication Logs</option>
+                                    <option value="apache">Apache Access Logs</option>
+                                    <option value="nginx">Nginx Access Logs</option>
+                                </select>
+                            </div>
+
+                            <div className="grid gap-2">
+                                <label className="text-sm text-zinc-400">Log file (max 5MB)</label>
+                                <input
+                                    type="file"
+                                    name="file"
+                                    accept=".log,.txt"
+                                    className="w-full px-4 py-3.5 bg-zinc-900/60 border border-zinc-800 rounded-2xl text-zinc-100 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:bg-white/5 file:text-zinc-100 hover:file:bg-white/10 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
+                                    required
+                                />
+                            </div>
+
+                            <PrimaryCTA type="submit" disabled={loading}>
+                                {loading ? '\u23F3 Analyzing...' : 'Upload & Analyze'}
+                            </PrimaryCTA>
+                        </form>
+
+                        {sessionId && (
+                            <div className="mt-8 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4">
+                                <p className="text-emerald-100 font-mono text-sm">Session: {sessionId}</p>
+                                <p className="mt-1 text-xs text-emerald-200/70">You can switch to Alerts to review detections.</p>
+                            </div>
+                        )}
+                    </GlassPanel>
+                </div>
+            );
+
+            const IntensityPill = ({ tone, children, onClick }) => {
+                const styles =
+                    tone === 'high'
+                        ? 'border-orange-500/25 bg-orange-500/10 text-orange-100 hover:bg-orange-500/18'
+                        : tone === 'medium'
+                        ? 'border-cyan-500/25 bg-cyan-500/10 text-cyan-100 hover:bg-cyan-500/18'
+                        : 'border-zinc-700 bg-white/5 text-zinc-200 hover:bg-white/10';
+                return (
+                    <M.button
+                        type="button"
+                        onClick={onClick}
+                        whileHover={__FM__ ? { scale: 1.02 } : undefined}
+                        whileTap={__FM__ ? { scale: 0.99 } : undefined}
+                        className={`px-4 py-2 rounded-full text-sm font-medium border transition ${styles}`}
+                    >
+                        {children}
+                    </M.button>
+                );
+            };
+
+            const QuickSimList = () => {
+                const attacks = [
+                    { type: 'ssh_brute_force', name: 'SSH Brute Force', icon: '\uD83D\uDD10' },
+                    { type: 'web_scan', name: 'Web Scanner', icon: '\uD83D\uDD0D' },
+                    { type: 'sql_injection', name: 'SQL Injection', icon: '\uD83D\uDC89' },
+                    { type: 'xss_attack', name: 'XSS Attack', icon: '\u26A0\uFE0F' },
+                    { type: 'port_scan', name: 'Port Scan', icon: '\uD83D\uDD0C' },
+                    { type: 'credential_stuffing', name: 'Credential Stuffing', icon: '\uD83E\uDD16' },
+                ];
+
+                return (
+                    <GlassPanel className="p-8">
+                        <div className="flex items-end justify-between gap-6">
+                            <div>
+                                <p className="text-sm text-zinc-400">Simulate</p>
+                                <h3 className="mt-2 text-2xl md:text-3xl font-semibold tracking-tight text-zinc-50">Quick simulations</h3>
+                            </div>
+                            <div className="hidden md:block text-sm text-zinc-400">glowing intensity pills</div>
+                        </div>
+
+                        <div className="mt-8 divide-y divide-white/5">
+                            {attacks.map((attack) => (
+                                <div key={attack.type} className="py-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                                    <div className="min-w-0">
+                                        <p className="text-base font-semibold text-zinc-100 truncate">{attack.icon} {attack.name}</p>
+                                        <p className="mt-1 text-sm text-zinc-400">Run a controlled signal burst for validation.</p>
+                                    </div>
+                                    <div className="flex flex-wrap gap-2">
+                                        <IntensityPill tone="low" onClick={() => runSimulation(attack.type, 'low')}>Low</IntensityPill>
+                                        <IntensityPill tone="medium" onClick={() => runSimulation(attack.type, 'medium')}>Medium</IntensityPill>
+                                        <IntensityPill tone="high" onClick={() => runSimulation(attack.type, 'high')}>High</IntensityPill>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </GlassPanel>
+                );
+            };
+
+            const ScenarioCards = () => {
+                const scenarios = [
+                    { name: 'apt_attack', title: 'APT Attack', desc: 'Port scan \u2192 SSH brute force \u2192 Credential stuffing' },
+                    { name: 'web_assault', title: 'Web Assault', desc: 'Web scan \u2192 SQL injection \u2192 XSS' },
+                    { name: 'network_recon', title: 'Network Recon', desc: 'Port scan \u2192 Web scan' },
+                    { name: 'data_exfiltration', title: 'Data Exfiltration', desc: 'SQL injection \u2192 Credential stuffing' },
+                ];
+
+                return (
+                    <GlassPanel className="p-8">
+                        <p className="text-sm text-zinc-400">Scenarios</p>
+                        <h3 className="mt-2 text-2xl md:text-3xl font-semibold tracking-tight text-zinc-50">Attack chains</h3>
+                        <p className="mt-3 text-sm text-zinc-400">Multi-step sequences that end in analyzable alerts.</p>
+
+                        <div className="mt-8 grid gap-4">
+                            {scenarios.map((scenario) => (
+                                <div key={scenario.name} className="relative rounded-[22px] border border-zinc-800/70 bg-zinc-950/40 overflow-hidden">
+                                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-orange-500/10 via-transparent to-red-500/10" />
+                                    <div className="relative p-6 md:p-7 flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+                                        <div className="min-w-0">
+                                            <p className="text-lg font-semibold text-zinc-100">{scenario.title}</p>
+                                            <p className="mt-1 text-sm text-zinc-300 font-mono break-words">{scenario.desc}</p>
+                                        </div>
+                                        <M.button
+                                            type="button"
+                                            onClick={() => runScenario(scenario.name)}
+                                            whileHover={__FM__ ? { scale: 1.01 } : undefined}
+                                            whileTap={__FM__ ? { scale: 0.99 } : undefined}
+                                            className="w-full md:w-auto px-6 py-3.5 rounded-2xl font-semibold bg-orange-500/15 text-orange-100 border border-orange-500/25 hover:bg-orange-500/22 transition"
+                                        >
+                                            Run scenario
+                                        </M.button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </GlassPanel>
+                );
+            };
+
+            const SimulatePanel = () => (
+                <div className="grid lg:grid-cols-12 gap-8">
+                    <div className="lg:col-span-6">
+                        <QuickSimList />
+                    </div>
+                    <div className="lg:col-span-6">
+                        <ScenarioCards />
+                    </div>
+
+                    {loading && (
+                        <div className="lg:col-span-12 text-center py-10">
+                            <div className="inline-flex items-center gap-3 rounded-2xl border border-zinc-800/70 bg-zinc-950/35 px-6 py-4">
+                                <div className="inline-block animate-spin rounded-full h-5 w-5 border-t-2 border-b-2 border-cyan-400"></div>
+                                <p className="text-sm text-zinc-300">Running simulation...</p>
+                            </div>
+                        </div>
+                    )}
+
+                    {simulationResult && (
+                        <div className="lg:col-span-12">
+                            <GlassPanel className="p-8">
+                                <div className="flex items-end justify-between gap-6">
+                                    <div>
+                                        <p className="text-sm text-zinc-400">Result</p>
+                                        <h3 className="mt-2 text-2xl md:text-3xl font-semibold tracking-tight text-zinc-50">Simulation complete</h3>
+                                    </div>
+                                    <div className="hidden md:block text-sm text-zinc-400">auto-switched to Alerts when session is created</div>
+                                </div>
+
+                                <div className="mt-8 grid md:grid-cols-4 gap-4">
+                                    <div className="rounded-2xl border border-zinc-800/70 bg-zinc-900/30 p-5">
+                                        <p className="text-sm text-zinc-400">Attack</p>
+                                        <p className="mt-1 text-xl font-semibold text-zinc-100">{simulationDisplay?.attackLabel || '\u2014'}</p>
+                                    </div>
+                                    <div className="rounded-2xl border border-zinc-800/70 bg-zinc-900/30 p-5">
+                                        <p className="text-sm text-zinc-400">Log lines</p>
+                                        <p className="mt-1 text-xl font-semibold text-cyan-200">{simulationDisplay?.logLines ?? '\u2014'}</p>
+                                    </div>
+                                    <div className="rounded-2xl border border-zinc-800/70 bg-zinc-900/30 p-5">
+                                        <p className="text-sm text-zinc-400">Duration</p>
+                                        <p className="mt-1 text-xl font-semibold text-emerald-200">{simulationDisplay?.durationSeconds === '\u2014' ? '\u2014' : `${simulationDisplay?.durationSeconds}s`}</p>
+                                    </div>
+                                    <div className="rounded-2xl border border-zinc-800/70 bg-zinc-900/30 p-5">
+                                        <p className="text-sm text-zinc-400">Attacker IPs</p>
+                                        <p className="mt-1 text-xl font-semibold text-orange-200">{simulationDisplay?.attackerCount ?? 'Multiple'}</p>
+                                    </div>
+                                </div>
+
+                                <div className="mt-8">
+                                    <p className="text-sm text-zinc-400">Generated logs (first 10 lines)</p>
+                                    <div className="mt-3 rounded-2xl border border-zinc-800/70 bg-zinc-950/60 p-5 overflow-auto max-h-96">
+                                        <pre className="text-xs text-emerald-200 font-mono whitespace-pre-wrap">{simulationDisplay?.preview || '\u2014'}</pre>
+                                    </div>
+                                </div>
+                            </GlassPanel>
+                        </div>
+                    )}
+                </div>
+            );
+
+            const AlertsPanel = () => {
+                const SeverityTag = ({ bucket }) => {
+                    const label = bucket.toUpperCase();
+                    const styles =
+                        bucket === 'critical'
+                            ? 'border-red-500/25 bg-red-500/10 text-red-100'
+                            : bucket === 'high'
+                            ? 'border-orange-500/25 bg-orange-500/10 text-orange-100'
+                            : bucket === 'medium'
+                            ? 'border-cyan-500/25 bg-cyan-500/10 text-cyan-100'
+                            : bucket === 'low'
+                            ? 'border-blue-500/25 bg-blue-500/10 text-blue-100'
+                            : 'border-zinc-700 bg-white/5 text-zinc-200';
+                    return (
+                        <span className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold tracking-wider ${styles}`}>
+                            {label}
+                        </span>
+                    );
+                };
+
+                const ExpiresBlock = () => {
+                    const si = alertsMeta?.session_info || {};
+                    const toMs = (v) => {
+                        if (v == null) return null;
+                        if (typeof v === 'number' && Number.isFinite(v)) return v < 1e12 ? v * 1000 : v;
+                        if (typeof v !== 'string') return null;
+                        const s0 = v.trim();
+                        if (!s0) return null;
+                        const looksNaiveIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(s0);
+                        const looksNaiveSpace = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(s0);
+                        const s = looksNaiveIso ? `${s0}Z` : (looksNaiveSpace ? `${s0.replace(' ', 'T')}Z` : s0);
+                        let t = Date.parse(s);
+                        if (Number.isNaN(t) && looksNaiveSpace) t = Date.parse(s0.replace(' ', 'T'));
+                        if (Number.isNaN(t) && looksNaiveIso) t = Date.parse(s0);
+                        return Number.isNaN(t) ? null : t;
+                    };
+                    const expiresMs = toMs(si.expires_at);
+                    const createdMs = toMs(si.created_at);
+                    const ttlFromApi = (typeof si.ttl_seconds === 'number' && Number.isFinite(si.ttl_seconds)) ? si.ttl_seconds : null;
+                    const ttlSeconds = ttlFromApi != null
+                        ? Math.max(0, Math.floor(ttlFromApi))
+                        : (expiresMs != null && createdMs != null)
+                            ? Math.max(0, Math.floor((expiresMs - createdMs) / 1000))
+                            : null;
+                    const remainingSeconds = (expiresMs != null)
+                        ? Math.floor((expiresMs - nowMs) / 1000)
+                        : (createdMs != null && ttlSeconds != null)
+                            ? (ttlSeconds - Math.floor((nowMs - createdMs) / 1000))
+                            : null;
+
+                    return (
+                        <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-6">
+                            <p className="text-sm text-zinc-400">Expires in</p>
+                            <p className="mt-2 text-2xl font-semibold tracking-tight text-cyan-200">{formatDuration(remainingSeconds)}</p>
+                            <p className="mt-2 text-xs text-zinc-500">TTL: {formatDuration(ttlSeconds)} {'\u2022'} Cleanup: every {Math.floor((serviceStats?.cleanup_interval_seconds || 300) / 60)} min</p>
+                        </div>
+                    );
+                };
+
+                return (
+                    <div className="grid gap-8">
+                        <GlassPanel className="p-8">
+                            <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-6">
+                                <div>
+                                    <p className="text-sm text-zinc-400">Alerts</p>
+                                    <h2 className="mt-2 text-3xl md:text-4xl font-semibold tracking-tight text-zinc-50">Detection console</h2>
+                                    <p className="mt-4 text-base text-zinc-300 leading-relaxed">Triage severity, context, and evidence in a log-style stream.</p>
+                                </div>
+                                {sessionId && (
+                                    <div className="flex items-center gap-2">
+                                        <M.button
+                                            type="button"
+                                            onClick={() => fetchAlerts()}
+                                            whileHover={__FM__ ? { scale: 1.01 } : undefined}
+                                            whileTap={__FM__ ? { scale: 0.99 } : undefined}
+                                            className="px-5 py-3 rounded-2xl bg-cyan-500/15 border border-cyan-500/20 text-cyan-100 hover:bg-cyan-500/22 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                            disabled={loading}
+                                        >
+                                            Refresh
+                                        </M.button>
+                                        <M.button
+                                            type="button"
+                                            onClick={clearSession}
+                                            whileHover={__FM__ ? { scale: 1.01 } : undefined}
+                                            whileTap={__FM__ ? { scale: 0.99 } : undefined}
+                                            className="px-5 py-3 rounded-2xl bg-white/5 border border-zinc-800 text-zinc-200 hover:bg-white/10 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                            disabled={loading}
+                                        >
+                                            Clear
+                                        </M.button>
+                                    </div>
+                                )}
+                            </div>
+                        </GlassPanel>
+
+                        {!sessionId ? (
+                            <GlassPanel className="p-10 text-center">
+                                <p className="text-zinc-300">No active session.</p>
+                                <p className="mt-2 text-sm text-zinc-400">Upload logs first, then come back here for alerts.</p>
+                                <div className="mt-8 flex justify-center">
+                                    <M.button
+                                        type="button"
+                                        onClick={() => setActiveTab('byol')}
+                                        whileHover={__FM__ ? { scale: 1.01 } : undefined}
+                                        whileTap={__FM__ ? { scale: 0.99 } : undefined}
+                                        className="px-7 py-3.5 rounded-2xl bg-cyan-500/15 border border-cyan-500/20 text-cyan-100 hover:bg-cyan-500/22 transition"
+                                    >
+                                        Go to Upload
+                                    </M.button>
+                                </div>
+                            </GlassPanel>
+                        ) : (
+                            <>
+                                {alertsMeta?.session_info && (
+                                    <div className="grid lg:grid-cols-12 gap-6">
+                                        <div className="lg:col-span-4 rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-6">
+                                            <p className="text-sm text-zinc-400">Session</p>
+                                            <p className="mt-2 text-xs font-mono text-zinc-200 break-all">{sessionId}</p>
+                                            <div className="mt-5 flex items-center gap-3">
+                                                <span className="text-xs text-zinc-500">Log type</span>
+                                                <span className="text-xs font-mono text-zinc-200">{alertsMeta.session_info.log_type}</span>
+                                            </div>
+                                            <div className="mt-2 flex items-center gap-3">
+                                                <span className="text-xs text-zinc-500">Events</span>
+                                                <span className="text-xs font-mono text-zinc-200">{alertsMeta.session_info.events_count}</span>
+                                            </div>
+                                        </div>
+                                        <div className="lg:col-span-4">
+                                            <ExpiresBlock />
+                                        </div>
+                                        <div className="lg:col-span-4 rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-6">
+                                            <p className="text-sm text-zinc-400">Filter</p>
+                                            <div className="mt-4 grid gap-3">
+                                                <div className="flex items-center gap-2">
+                                                    <label className="text-xs text-zinc-500">Severity</label>
+                                                    <select
+                                                        value={severityFilter}
+                                                        onChange={(e) => setSeverityFilter(e.target.value)}
+                                                        className="flex-1 px-3 py-2 bg-zinc-900/60 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
+                                                    >
+                                                        <option value="all">All</option>
+                                                        <option value="critical">Critical</option>
+                                                        <option value="high">High</option>
+                                                        <option value="medium">Medium</option>
+                                                        <option value="low">Low</option>
+                                                        <option value="info">Info</option>
+                                                    </select>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <label className="text-xs text-zinc-500">Sort</label>
+                                                    <select
+                                                        value={sortMode}
+                                                        onChange={(e) => setSortMode(e.target.value)}
+                                                        className="flex-1 px-3 py-2 bg-zinc-900/60 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
+                                                    >
+                                                        <option value="severity_desc">Severity (desc)</option>
+                                                        <option value="severity_asc">Severity (asc)</option>
+                                                        <option value="time_desc">Time (newest)</option>
+                                                        <option value="time_asc">Time (oldest)</option>
+                                                        <option value="title_asc">Title (A-Z)</option>
+                                                    </select>
+                                                </div>
+                                                <input
+                                                    value={query}
+                                                    onChange={(e) => setQuery(e.target.value)}
+                                                    placeholder="Search title, IP, host, rule..."
+                                                    className="w-full px-4 py-2.5 bg-zinc-900/60 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
+                                                />
+                                                <div className="text-xs text-zinc-500">Showing <span className="text-zinc-200">{filteredSortedAlerts.length}</span> / {alerts.length}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {alerts.length === 0 ? (
+                                    <GlassPanel className="p-10 text-center">
+                                        <p className="text-emerald-200 text-lg">No threats detected</p>
+                                        <p className="mt-2 text-sm text-zinc-400">This session produced zero alerts.</p>
+                                    </GlassPanel>
+                                ) : (
+                                    <GlassPanel className="overflow-hidden">
+                                        <div className="px-6 py-5 border-b border-white/5">
+                                            <p className="text-xs text-zinc-500 font-mono">STREAM {'\u2022'} {filteredSortedAlerts.length} entries</p>
+                                        </div>
+
+                                        <div className="divide-y divide-white/5">
+                                            {filteredSortedAlerts.map((alert) => {
+                                                const id = alert.alert_id || `${alert.rule_id}-${alert.timestamp}-${Math.random()}`;
+                                                const title = alert.title || alert.alert_type || alert.rule_id || 'Alert';
+                                                const sev = (alert.severity || '').toLowerCase();
+                                                const bucket = sev === 'critical' ? 'critical' : (sev === 'high') ? 'high' : (sev === 'medium') ? 'medium' : (sev === 'low') ? 'low' : 'info';
+                                                const affectedIps = Array.isArray(alert.affected_ips) ? alert.affected_ips : [];
+                                                const affectedHosts = Array.isArray(alert.affected_hosts) ? alert.affected_hosts : [];
+                                                const isOpen = expandedAlertId === id;
+
+                                                return (
+                                                    <div key={id} className="bg-zinc-950/10">
+                                                        <button
+                                                            onClick={() => setExpandedAlertId(isOpen ? null : id)}
+                                                            className="w-full text-left px-6 py-5 hover:bg-white/5 transition"
+                                                        >
+                                                            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                                                                <div className="flex items-start gap-4 min-w-0">
+                                                                    <SeverityTag bucket={bucket} />
+                                                                    <div className="min-w-0">
+                                                                        <p className="text-sm text-zinc-500 font-mono truncate">{alert.rule_id || 'rule'} {'\u2022'} IPs:{affectedIps.length} {'\u2022'} Hosts:{affectedHosts.length}</p>
+                                                                        <p className="mt-1 text-lg font-semibold text-zinc-100 truncate">{title}</p>
+                                                                    </div>
+                                                                </div>
+                                                                <div className="text-xs text-zinc-500 font-mono flex items-center gap-3">
+                                                                    <span className="hidden md:inline">{alert.timestamp || ''}</span>
+                                                                    <span className="text-zinc-300">{isOpen ? '\u25BC' : '\u25B6'}</span>
+                                                                </div>
+                                                            </div>
+                                                        </button>
+
+                                                        <AnimatePresence>
+                                                            {isOpen && (
+                                                                <M.div
+                                                                    initial={__FM__ ? { opacity: 0, y: -6 } : undefined}
+                                                                    animate={__FM__ ? { opacity: 1, y: 0 } : undefined}
+                                                                    exit={__FM__ ? { opacity: 0, y: -6 } : undefined}
+                                                                    transition={__FM__ ? { duration: 0.18 } : undefined}
+                                                                    className="px-6 pb-6"
+                                                                >
+                                                                    <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/55 p-6">
+                                                                        <div className="flex items-center justify-end">
+                                                                            <button
+                                                                                onClick={() => copyTriageNote(alert)}
+                                                                                className="px-4 py-2 rounded-xl bg-white/5 border border-zinc-800 text-zinc-200 hover:bg-white/10 transition text-sm"
+                                                                            >
+                                                                                Copy triage note
+                                                                            </button>
+                                                                        </div>
+
+                                                                        <p className="mt-4 text-zinc-200 leading-relaxed">{alert.description}</p>
+
+                                                                        {alert.soc_explanation && (
+                                                                            <div className="mt-6 grid md:grid-cols-2 gap-4">
+                                                                                <div className="rounded-2xl border border-zinc-800/70 bg-zinc-900/30 p-5">
+                                                                                    <p className="text-xs text-zinc-500">Why triggered</p>
+                                                                                    <p className="mt-2 text-sm text-zinc-200">{alert.soc_explanation.why_triggered}</p>
+                                                                                </div>
+                                                                                <div className="rounded-2xl border border-zinc-800/70 bg-zinc-900/30 p-5">
+                                                                                    <p className="text-xs text-zinc-500">Key data points</p>
+                                                                                    <div className="mt-3 space-y-1.5 text-sm">
+                                                                                        {(alert.soc_explanation.data_points || []).slice(0, 8).map((dp, i) => (
+                                                                                            <div key={i} className="flex gap-2">
+                                                                                                <span className="text-zinc-500">{dp.label}:</span>
+                                                                                                <span className="text-zinc-200 break-words">{Array.isArray(dp.value) ? dp.value.join(', ') : String(dp.value)}</span>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
+
+                                                                        {(affectedIps.length > 0 || affectedHosts.length > 0) && (
+                                                                            <div className="mt-6 grid md:grid-cols-2 gap-4">
+                                                                                {affectedIps.length > 0 && (
+                                                                                    <div className="rounded-2xl border border-zinc-800/70 bg-zinc-900/30 p-5">
+                                                                                        <p className="text-xs text-zinc-500">Affected IPs</p>
+                                                                                        <p className="mt-2 text-sm font-mono text-orange-200 break-words">{affectedIps.join(', ')}</p>
+                                                                                    </div>
+                                                                                )}
+                                                                                {affectedHosts.length > 0 && (
+                                                                                    <div className="rounded-2xl border border-zinc-800/70 bg-zinc-900/30 p-5">
+                                                                                        <p className="text-xs text-zinc-500">Affected hosts</p>
+                                                                                        <p className="mt-2 text-sm font-mono text-zinc-200 break-words">{affectedHosts.join(', ')}</p>
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        )}
+
+                                                                        {alert.recommendations && alert.recommendations.length > 0 && (
+                                                                            <div className="mt-6">
+                                                                                <p className="text-xs text-zinc-500">Recommendations</p>
+                                                                                <ul className="mt-3 list-disc list-inside text-sm text-zinc-200 space-y-1">
+                                                                                    {alert.recommendations.map((rec, i) => (
+                                                                                        <li key={i}>{rec}</li>
+                                                                                    ))}
+                                                                                </ul>
+                                                                            </div>
+                                                                        )}
+
+                                                                        {alert.soc_explanation?.recommended_next_steps && alert.soc_explanation.recommended_next_steps.length > 0 && (
+                                                                            <div className="mt-6">
+                                                                                <p className="text-xs text-zinc-500">SOC next steps</p>
+                                                                                <ul className="mt-3 list-disc list-inside text-sm text-zinc-200 space-y-1">
+                                                                                    {alert.soc_explanation.recommended_next_steps.map((step, i) => (
+                                                                                        <li key={i}>{step}</li>
+                                                                                    ))}
+                                                                                </ul>
+                                                                            </div>
+                                                                        )}
+
+                                                                        {alert.evidence && (
+                                                                            <div className="mt-6">
+                                                                                <p className="text-xs text-zinc-500">Evidence</p>
+                                                                                <pre className="mt-3 text-xs text-zinc-200 bg-zinc-950/60 border border-zinc-800/70 rounded-2xl p-4 overflow-auto max-h-64">
+                                                                                    {JSON.stringify(alert.evidence, null, 2)}
+                                                                                </pre>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                </M.div>
+                                                            )}
+                                                        </AnimatePresence>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </GlassPanel>
+                                )}
+                            </>
+                        )}
+                    </div>
+                );
+            };
+
+            const SOCShell = ({ children }) => (
+                <div className="min-h-screen bg-gradient-to-b from-zinc-950 via-zinc-950 to-zinc-950">
+                    <div className="pointer-events-none fixed inset-0 bg-gradient-to-br from-cyan-500/6 via-transparent to-blue-500/6" />
+
+                    <header className="sticky top-0 z-30 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur">
+                        <div className="mx-auto max-w-[1400px] px-6 py-5">
+                            <div className="flex items-center justify-between gap-4">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-400/25 to-blue-500/15 border border-cyan-500/20 flex items-center justify-center">
+                                        <svg className="w-6 h-6 text-cyan-200" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                                        </svg>
+                                    </div>
+                                    <div className="leading-tight">
+                                        <div className="flex items-baseline gap-2">
+                                            <h1 className="text-lg md:text-xl font-semibold tracking-tight">SOC Platform</h1>
+                                            <span className="text-xs text-zinc-400">SOC</span>
+                                        </div>
+                                        <p className="text-sm text-zinc-400">BYOL analysis & safe attack simulation</p>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={openCreator}
+                                        className="inline-flex items-center gap-2 rounded-xl border border-zinc-800 bg-white/5 px-4 py-2.5 text-sm text-zinc-200 transition hover:bg-white/10 active:translate-y-[1px]"
+                                        aria-label="About the creator"
+                                    >
+                                        Creator
+                                    </button>
+
+                                    <div className="relative group">
+                                        <button
+                                            type="button"
+                                            disabled
+                                            className="inline-flex items-center gap-2 rounded-xl border border-zinc-800 bg-white/5 px-4 py-2.5 text-sm text-zinc-200 transition hover:bg-white/10 active:translate-y-[1px] disabled:opacity-60 disabled:cursor-not-allowed"
+                                            aria-label="GitHub (coming soon)"
+                                        >
+                                            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor" aria-hidden="true">
+                                                <path d="M12 .5a12 12 0 00-3.79 23.4c.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.09-.74.09-.74 1.2.08 1.83 1.23 1.83 1.23 1.08 1.85 2.82 1.32 3.5 1.01.11-.79.42-1.32.76-1.63-2.67-.3-5.47-1.34-5.47-5.95 0-1.31.47-2.39 1.23-3.23-.12-.3-.53-1.52.12-3.17 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 016 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.87.12 3.17.77.84 1.23 1.92 1.23 3.23 0 4.62-2.8 5.64-5.48 5.94.43.38.82 1.12.82 2.26v3.35c0 .32.22.69.83.58A12 12 0 0012 .5z" />
+                                            </svg>
+                                            <span>GitHub</span>
+                                            <span className="ml-1 rounded-full border border-zinc-700 bg-zinc-900/60 px-2 py-0.5 text-[10px] text-zinc-400">soon</span>
+                                        </button>
+                                        <div className="pointer-events-none absolute right-0 top-full mt-2 w-48 rounded-lg border border-zinc-800 bg-zinc-950/90 px-3 py-2 text-xs text-zinc-300 opacity-0 translate-y-1 transition group-hover:opacity-100 group-hover:translate-y-0 group-focus-within:opacity-100 group-focus-within:translate-y-0">
+                                            Repo is coming soon.
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    <SOCNav />
+
+                    <main className="mx-auto max-w-[1400px] px-6 pt-10 pb-16">
+                        {error && (
+                            <div className="mb-8 rounded-2xl border border-red-500/25 bg-red-500/10 px-5 py-4 text-red-100">
+                                Error: {error}
+                            </div>
+                        )}
+                        <AnimatePresence mode="wait">
+                            <M.div
+                                key={activeTab}
+                                initial={(__FM__ && activeTab !== 'alerts') ? { opacity: 0, y: 10 } : undefined}
+                                animate={(__FM__ && activeTab !== 'alerts') ? { opacity: 1, y: 0 } : undefined}
+                                exit={(__FM__ && activeTab !== 'alerts') ? { opacity: 0, y: -10 } : undefined}
+                                transition={(__FM__ && activeTab !== 'alerts') ? { duration: 0.22, ease: 'easeOut' } : undefined}
+                            >
+                                {children}
+                            </M.div>
+                        </AnimatePresence>
+                    </main>
+
+                    <footer className="border-t border-zinc-800/80 py-10 text-center text-zinc-500 text-sm">
+                        <p>SOC Platform {'\u00A9'} 2026 {'\u2022'} Created by Even Rygh {'\u2022'} Session: {sessionId || 'None'}</p>
+                    </footer>
+                </div>
+            );
+
+            return (
+                <SOCShell>
+                    {showWelcome && (<SOCOverlay onDismiss={dismissWelcome} />)}
+                    {showCreator && (<CreatorOverlay onClose={closeCreator} />)}
+                    {activeTab === 'byol' && (<UploadPanel />)}
+                    {activeTab === 'simulation' && (<SimulatePanel />)}
+                    {activeTab === 'alerts' && (<AlertsPanel />)}
+                </SOCShell>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
