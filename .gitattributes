@@ -1,0 +1,23 @@
+# @even rygh
+
+# Keep line endings consistent cross-platform.
+* text=auto eol=lf
+
+# Windows scripts
+*.bat text eol=crlf
+
+# Binary assets
+*.jpg binary
+*.png binary
+*.gif binary
+*.ico binary
+
+# Vendored third-party files: keep as-is
+frontend/vendor/** -text
+
+# Exclude local/runtime artifacts from GitHub "Download ZIP" exports (git archive)
+.pids/ export-ignore
+__pycache__/ export-ignore
+.pytest_cache/ export-ignore
+.venv/ export-ignore
+.env export-ignore
